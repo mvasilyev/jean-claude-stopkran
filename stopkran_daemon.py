@@ -110,7 +110,15 @@ async def resolve_request(request_id: str, action: str, app: Application):
 
     now = datetime.now(timezone.utc).strftime("%H:%M")
     emoji = "✅" if action == "allow" else "❌"
-    label = "Allowed" if action == "allow" else "Denied"
+
+    # For AskUserQuestion, show the selected answer
+    answer_data = entry.get("answer")
+    if answer_data and action == "allow":
+        answers = answer_data.get("answers", {})
+        selected_label = next(iter(answers.values()), None) if answers else None
+        label = f"Ответ: {selected_label}" if selected_label else "Allowed"
+    else:
+        label = "Allowed" if action == "allow" else "Denied"
 
     cfg = app.bot_data["config"]
     chat_id = cfg.get("chat_id")
@@ -153,16 +161,55 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await query.answer("⛔ Not authorized", show_alert=True)
         return
 
-    data = query.data  # "allow:<request_id>" or "deny:<request_id>"
+    data = query.data  # "allow:<id>", "deny:<id>", or "ans:<id>:<index>"
     if ":" not in data:
         await query.answer("Invalid callback")
         return
 
-    action, request_id = data.split(":", 1)
-    if action not in ("allow", "deny"):
+    parts = data.split(":", 2)
+    action = parts[0]
+
+    if action == "ans" and len(parts) == 3:
+        # AskUserQuestion answer: ans:<request_id>:<option_index>
+        request_id = parts[1]
+        try:
+            option_idx = int(parts[2])
+        except ValueError:
+            await query.answer("Invalid option")
+            return
+
+        entry = pending.get(request_id)
+        if entry is None:
+            await query.answer("Request expired or already handled")
+            return
+
+        questions = entry.get("questions") or []
+        if not questions:
+            await query.answer("No questions data")
+            return
+
+        options = questions[0].get("options", [])
+        if option_idx < 0 or option_idx >= len(options):
+            await query.answer("Invalid option index")
+            return
+
+        selected = options[option_idx]
+        question_text = questions[0].get("question", "")
+        # Build the answers dict: {question_text: selected_label}
+        entry["answer"] = {"answers": {question_text: selected["label"]}}
+
+        ok = await resolve_request(request_id, "allow", ctx.application)
+        if ok:
+            await query.answer(f"✅ {selected['label']}")
+        else:
+            await query.answer("Request expired or already handled")
+        return
+
+    if action not in ("allow", "deny") or len(parts) < 2:
         await query.answer("Invalid action")
         return
 
+    request_id = parts[1]
     ok = await resolve_request(request_id, action, ctx.application)
     emoji = "✅" if action == "allow" else "❌"
     label = "Allowed" if action == "allow" else "Denied"
@@ -185,6 +232,27 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = (update.message.text or "").strip().lower()
 
+    request_id = get_oldest_pending_request_id()
+
+    # Handle digit replies for AskUserQuestion
+    if text.isdigit() and request_id:
+        entry = pending.get(request_id)
+        if entry and entry.get("tool_name") == "AskUserQuestion":
+            option_idx = int(text) - 1  # 1-based to 0-based
+            questions = entry.get("questions") or []
+            if questions:
+                options = questions[0].get("options", [])
+                if 0 <= option_idx < len(options):
+                    selected = options[option_idx]
+                    question_text = questions[0].get("question", "")
+                    entry["answer"] = {"answers": {question_text: selected["label"]}}
+                    ok = await resolve_request(request_id, "allow", ctx.application)
+                    if ok:
+                        await update.message.reply_text(f"✅ {selected['label']}")
+                    else:
+                        await update.message.reply_text("Request already handled.")
+                    return
+
     if text in ALLOW_PATTERNS:
         action = "allow"
     elif text in DENY_PATTERNS:
@@ -192,7 +260,6 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    request_id = get_oldest_pending_request_id()
     if request_id is None:
         await update.message.reply_text("No pending requests.")
         return
@@ -208,6 +275,32 @@ async def text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ---------------------------------------------------------------------------
 # Format the Telegram message for a permission request
 # ---------------------------------------------------------------------------
+
+def format_ask_message(req: dict) -> tuple[str, list[dict]]:
+    """Format an AskUserQuestion request. Returns (text, questions)."""
+    tool_input = req.get("tool_input", {})
+    questions = tool_input.get("questions", [])
+    session = req.get("session_id", "")[:8]
+
+    lines = ["❓ Вопрос от Claude", ""]
+
+    for q in questions:
+        lines.append(q.get("question", ""))
+        lines.append("")
+        for i, opt in enumerate(q.get("options", []), 1):
+            label = opt.get("label", "")
+            desc = opt.get("description", "")
+            if desc:
+                lines.append(f"{i}. {label} — {desc}")
+            else:
+                lines.append(f"{i}. {label}")
+        lines.append("")
+
+    if session:
+        lines.append(f"Session: {session}")
+
+    return "\n".join(lines).strip(), questions
+
 
 def format_request_message(req: dict) -> str:
     tool = req.get("tool_name", "Unknown")
@@ -276,21 +369,45 @@ async def handle_hook_connection(
 
         # Register the pending request
         event = asyncio.Event()
-        # Send Telegram message with inline keyboard
-        text = format_request_message(req)
+        tool_name = req.get("tool_name", "")
+        is_ask = tool_name == "AskUserQuestion"
+        questions = None
+
+        if is_ask:
+            text, questions = format_ask_message(req)
+            # Build option buttons — one per option in the first question
+            option_buttons = []
+            if questions:
+                for i, opt in enumerate(questions[0].get("options", [])):
+                    label = opt.get("label", f"Option {i+1}")
+                    option_buttons.append(
+                        [InlineKeyboardButton(
+                            f"{i+1}. {label}",
+                            callback_data=f"ans:{request_id}:{i}",
+                        )]
+                    )
+            option_buttons.append(
+                [InlineKeyboardButton("❌ Deny", callback_data=f"deny:{request_id}")]
+            )
+            keyboard = InlineKeyboardMarkup(option_buttons)
+        else:
+            text = format_request_message(req)
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Allow", callback_data=f"allow:{request_id}"),
+                    InlineKeyboardButton("❌ Deny", callback_data=f"deny:{request_id}"),
+                ]
+            ])
 
         pending[request_id] = {
             "event": event,
             "decision": None,
             "tg_message_id": None,
             "tg_message_text": text,
+            "tool_name": tool_name,
+            "questions": questions,
+            "answer": None,
         }
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Allow", callback_data=f"allow:{request_id}"),
-                InlineKeyboardButton("❌ Deny", callback_data=f"deny:{request_id}"),
-            ]
-        ])
 
         msg = await app.bot.send_message(
             chat_id=chat_id,
@@ -318,11 +435,17 @@ async def handle_hook_connection(
             except Exception:
                 pass
 
+        # Snapshot before cleanup
+        entry_snapshot = pending.get(request_id) or {}
+
         # Clean up
         pending.pop(request_id, None)
 
         # Send decision back to hook
-        response = json.dumps({"decision": decision}) + "\n"
+        resp_data = {"decision": decision}
+        if entry_snapshot.get("answer") is not None:
+            resp_data["updatedInput"] = entry_snapshot["answer"]
+        response = json.dumps(resp_data) + "\n"
         writer.write(response.encode("utf-8"))
         await writer.drain()
         log.info("Request %s resolved: %s", request_id, decision)

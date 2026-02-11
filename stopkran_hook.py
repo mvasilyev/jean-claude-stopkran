@@ -61,6 +61,7 @@ def main():
 
         response = json.loads(data.decode("utf-8").strip())
         decision = response.get("decision", "deny")
+        updated_input = response.get("updatedInput")
 
     except (
         FileNotFoundError,
@@ -74,10 +75,13 @@ def main():
 
     # Output the decision in Claude Code hook format
     if decision == "allow":
+        decision_obj = {"behavior": "allow"}
+        if updated_input is not None:
+            decision_obj["updatedInput"] = updated_input
         result = {
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",
-                "decision": {"behavior": "allow"},
+                "decision": decision_obj,
             }
         }
     else:
