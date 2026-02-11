@@ -13,13 +13,19 @@ import json
 import socket
 import sys
 import uuid
+from pathlib import Path
 
 SOCKET_PATH = "/tmp/stopkran.sock"
+PAUSED_FLAG = Path.home() / ".config" / "stopkran" / "paused"
 # Must be less than the hook timeout in settings.json (330s)
 RECV_TIMEOUT = 310
 
 
 def main():
+    # If paused, exit immediately — Claude Code falls back to native UI
+    if PAUSED_FLAG.exists():
+        sys.exit(0)
+
     # Read the hook event from stdin
     try:
         raw = sys.stdin.read()

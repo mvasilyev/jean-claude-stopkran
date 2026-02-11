@@ -33,6 +33,7 @@ from telegram.ext import (
 CONFIG_PATH = Path.home() / ".config" / "stopkran" / "config.json"
 SOCKET_PATH = "/tmp/stopkran.sock"
 DEFAULT_TIMEOUT = 300  # seconds before auto-deny
+PAUSED_FLAG = CONFIG_PATH.parent / "paused"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -86,17 +87,42 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Show the number of pending requests."""
+    """Show pause state and the number of pending requests."""
     cfg = ctx.bot_data["config"]
     if update.effective_chat.id != cfg.get("chat_id"):
         return
 
+    paused = PAUSED_FLAG.exists()
+    mode = "⏸ Paused" if paused else "▶️ Active"
+
     n = len(pending)
     if n == 0:
-        text = "No pending permission requests."
+        pending_text = "No pending permission requests."
     else:
-        text = f"⏳ {n} pending permission request(s)."
-    await update.message.reply_text(text)
+        pending_text = f"⏳ {n} pending permission request(s)."
+
+    await update.message.reply_text(f"{mode}\n{pending_text}")
+
+
+async def cmd_pause(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Pause — stop forwarding requests to Telegram."""
+    cfg = ctx.bot_data["config"]
+    if update.effective_chat.id != cfg.get("chat_id"):
+        return
+
+    PAUSED_FLAG.parent.mkdir(parents=True, exist_ok=True)
+    PAUSED_FLAG.touch()
+    await update.message.reply_text("⏸ Paused — запросы идут через нативный UI")
+
+
+async def cmd_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Resume — start forwarding requests to Telegram again."""
+    cfg = ctx.bot_data["config"]
+    if update.effective_chat.id != cfg.get("chat_id"):
+        return
+
+    PAUSED_FLAG.unlink(missing_ok=True)
+    await update.message.reply_text("▶️ Resumed — запросы идут в Telegram")
 
 
 async def resolve_request(request_id: str, action: str, app: Application):
@@ -526,6 +552,8 @@ async def main():
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("pause", cmd_pause))
+    app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 

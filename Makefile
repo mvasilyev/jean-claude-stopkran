@@ -1,4 +1,4 @@
-.PHONY: install setup start stop restart status logs uninstall hook-install hook-uninstall
+.PHONY: install setup start stop restart status logs uninstall hook-install hook-uninstall pause unpause
 
 PLIST_NAME := com.stopkran.daemon
 PLIST_SRC  := $(CURDIR)/$(PLIST_NAME).plist
@@ -88,6 +88,17 @@ hook-uninstall: ## Remove stopkran hook from Claude Code settings.json
 	s['hooks']['PermissionRequest'] = [e for e in h if not any('stopkran_hook' in x.get('command','') for x in e.get('hooks',[]))]; \
 	p.write_text(json.dumps(s,indent=2)); \
 	print('✅ Hook removed')"
+
+# ── Pause mode ────────────────────────────────────────────────
+
+pause: ## Pause — stop forwarding to Telegram, use native UI
+	@mkdir -p $(HOME)/.config/stopkran
+	@touch $(HOME)/.config/stopkran/paused
+	@echo "⏸ Paused"
+
+unpause: ## Resume — forward requests to Telegram again
+	@rm -f $(HOME)/.config/stopkran/paused
+	@echo "▶️ Resumed"
 
 # ── Cleanup ───────────────────────────────────────────────────
 
