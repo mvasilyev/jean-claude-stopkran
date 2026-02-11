@@ -39,6 +39,7 @@ def main():
         "tool_name": event.get("tool_name", ""),
         "tool_input": event.get("tool_input", {}),
         "cwd": event.get("cwd", ""),
+        "permission_suggestions": event.get("permission_suggestions", []),
     })
 
     try:
@@ -62,6 +63,7 @@ def main():
         response = json.loads(data.decode("utf-8").strip())
         decision = response.get("decision", "deny")
         updated_input = response.get("updatedInput")
+        updated_permissions = response.get("updatedPermissions")
 
     except (
         FileNotFoundError,
@@ -78,6 +80,8 @@ def main():
         decision_obj = {"behavior": "allow"}
         if updated_input is not None:
             decision_obj["updatedInput"] = updated_input
+        if updated_permissions is not None:
+            decision_obj["updatedPermissions"] = updated_permissions
         result = {
             "hookSpecificOutput": {
                 "hookEventName": "PermissionRequest",

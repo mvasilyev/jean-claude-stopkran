@@ -117,6 +117,8 @@ async def resolve_request(request_id: str, action: str, app: Application):
         answers = answer_data.get("answers", {})
         selected_label = next(iter(answers.values()), None) if answers else None
         label = f"Ответ: {selected_label}" if selected_label else "Allowed"
+    elif entry.get("always_allow") and action == "allow":
+        label = "Always Allowed"
     else:
         label = "Allowed" if action == "allow" else "Denied"
 
@@ -201,6 +203,19 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ok = await resolve_request(request_id, "allow", ctx.application)
         if ok:
             await query.answer(f"✅ {selected['label']}")
+        else:
+            await query.answer("Request expired or already handled")
+        return
+
+    if action == "alwys" and len(parts) >= 2:
+        # Always Allow: resolve as allow + flag for updatedPermissions
+        request_id = parts[1]
+        entry = pending.get(request_id)
+        if entry is not None:
+            entry["always_allow"] = True
+        ok = await resolve_request(request_id, "allow", ctx.application)
+        if ok:
+            await query.answer("✅ Always Allowed")
         else:
             await query.answer("Request expired or already handled")
         return
@@ -392,12 +407,20 @@ async def handle_hook_connection(
             keyboard = InlineKeyboardMarkup(option_buttons)
         else:
             text = format_request_message(req)
-            keyboard = InlineKeyboardMarkup([
-                [
-                    InlineKeyboardButton("✅ Allow", callback_data=f"allow:{request_id}"),
-                    InlineKeyboardButton("❌ Deny", callback_data=f"deny:{request_id}"),
-                ]
-            ])
+            buttons = [
+                InlineKeyboardButton("✅ Allow", callback_data=f"allow:{request_id}"),
+                InlineKeyboardButton("❌ Deny", callback_data=f"deny:{request_id}"),
+            ]
+            perm_suggestions = req.get("permission_suggestions", [])
+            rows = [buttons]
+            if perm_suggestions:
+                rows.append([
+                    InlineKeyboardButton(
+                        "✅ Always Allow",
+                        callback_data=f"alwys:{request_id}",
+                    )
+                ])
+            keyboard = InlineKeyboardMarkup(rows)
 
         pending[request_id] = {
             "event": event,
@@ -407,6 +430,7 @@ async def handle_hook_connection(
             "tool_name": tool_name,
             "questions": questions,
             "answer": None,
+            "permission_suggestions": req.get("permission_suggestions", []),
         }
 
         msg = await app.bot.send_message(
@@ -445,6 +469,10 @@ async def handle_hook_connection(
         resp_data = {"decision": decision}
         if entry_snapshot.get("answer") is not None:
             resp_data["updatedInput"] = entry_snapshot["answer"]
+        if entry_snapshot.get("always_allow"):
+            perm_suggs = entry_snapshot.get("permission_suggestions", [])
+            if perm_suggs:
+                resp_data["updatedPermissions"] = perm_suggs
         response = json.dumps(resp_data) + "\n"
         writer.write(response.encode("utf-8"))
         await writer.drain()
