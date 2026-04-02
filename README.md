@@ -23,7 +23,7 @@ git clone <repo-url> && cd jean-claude-stopkran
 # Установить зависимости, настроить токен, хук и автозапуск
 make setup
 
-# Запустить демон в фоне (launchd)
+# Запустить демон в фоне (launchd на macOS, systemd на Linux)
 make start-bg
 
 # Отправить /start боту в Telegram
@@ -38,10 +38,10 @@ make help            Показать все команды
 make install         Установить зависимости (uv sync)
 make setup           Интерактивный мастер настройки
 make start           Запустить демон (foreground)
-make start-bg        Запустить демон через launchd
+make start-bg        Запустить демон (launchd / systemd)
 make stop            Остановить демон
-make restart         Перезапустить демон (launchd)
-make status          Показать статус: процесс, сокет, конфиг, хук
+make restart         Перезапустить демон
+make status          Показать статус: процесс, сокет, конфиг, хук, сервис
 make logs            Следить за логами (tail -f)
 make hook-install    Добавить хук в ~/.claude/settings.json
 make hook-uninstall  Убрать хук из settings.json
@@ -136,6 +136,7 @@ make hook-install
 | `stopkran_hook.py` | Хук для Claude Code (только stdlib) |
 | `stopkran_setup.py` | Интерактивная настройка |
 | `com.stopkran.daemon.plist` | Шаблон launchd для macOS |
+| `stopkran.service` | Шаблон systemd для Linux |
 | `Makefile` | Команды управления |
 | `pyproject.toml` | Зависимости (uv) |
 
@@ -146,6 +147,10 @@ make hook-install
 make status    # проверить статус
 make logs      # посмотреть логи
 ```
+
+**На Linux демон падает с `TimedOut` / `ConnectTimeout`**
+- Скорее всего нужен прокси. systemd запускает сервисы в чистом окружении без переменных из шелла.
+- Убедитесь, что `HTTP_PROXY` / `HTTPS_PROXY` выставлены в текущей сессии, и выполните `make start-bg` — он автоматически пропишет их в `.service` файл.
 
 **Хук не срабатывает**
 - Перезапустить Claude Code после изменения `settings.json`

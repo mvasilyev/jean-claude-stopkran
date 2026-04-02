@@ -6,7 +6,7 @@ Interactive script that:
 1. Asks for the Telegram bot token (from BotFather)
 2. Creates ~/.config/stopkran/config.json
 3. Adds the hook to ~/.claude/settings.json (preserving existing hooks)
-4. Optionally installs a launchd plist for macOS autostart
+4. Installs autostart service (launchd on macOS, systemd on Linux)
 """
 
 import json
@@ -118,12 +118,34 @@ def step_hook():
     print(f"✅ Hook added to {CLAUDE_SETTINGS_PATH}")
 
 
-def step_launchd():
-    print("\n── Step 4: Autostart (macOS launchd) ──")
-    if sys.platform != "darwin":
-        print("Not macOS — skipping launchd setup.")
-        return
+def _resolve_template_vars() -> dict[str, str]:
+    """Resolve common template variables for service files."""
+    import shutil
+    uv_path = shutil.which("uv") or "uv"
+    project_path = str(SCRIPT_DIR)
+    daemon_path = str(SCRIPT_DIR / "stopkran_daemon.py")
+    log_path = str(Path.home() / ".local" / "log" / "stopkran.log")
+    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
 
+    return {
+        "{{UV}}": uv_path,
+        "{{PROJECT}}": project_path,
+        "{{DAEMON}}": daemon_path,
+        "{{LOG}}": log_path,
+    }
+
+
+def _render_template(template_path: Path, replacements: dict[str, str]) -> str:
+    """Read a template file and apply replacements."""
+    with open(template_path) as f:
+        content = f.read()
+    for placeholder, value in replacements.items():
+        content = content.replace(placeholder, value)
+    return content
+
+
+def step_launchd():
+    """Install launchd plist (macOS)."""
     if not ask_yn("Install launchd plist for autostart?"):
         return
 
@@ -136,26 +158,11 @@ def step_launchd():
 
     LAUNCHD_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Read template and fill in paths
-    with open(plist_template) as f:
-        content = f.read()
-
-    import shutil
-    uv_path = shutil.which("uv") or "uv"
-    project_path = str(SCRIPT_DIR)
-    daemon_path = str(SCRIPT_DIR / "stopkran_daemon.py")
-    log_path = str(Path.home() / ".local" / "log" / "stopkran.log")
-    Path(log_path).parent.mkdir(parents=True, exist_ok=True)
-
-    content = content.replace("{{UV}}", uv_path)
-    content = content.replace("{{PROJECT}}", project_path)
-    content = content.replace("{{DAEMON}}", daemon_path)
-    content = content.replace("{{LOG}}", log_path)
+    content = _render_template(plist_template, _resolve_template_vars())
 
     with open(plist_dest, "w") as f:
         f.write(content)
 
-    # Unload if already loaded, then load
     subprocess.run(
         ["launchctl", "unload", str(plist_dest)],
         capture_output=True,
@@ -172,6 +179,68 @@ def step_launchd():
         print(f"Plist saved to {plist_dest} — load it manually.")
 
 
+def step_systemd():
+    """Install systemd user service (Linux)."""
+    if not ask_yn("Install systemd user service for autostart?"):
+        return
+
+    service_template = SCRIPT_DIR / "stopkran.service"
+    if not service_template.exists():
+        print(f"⚠️  Service template not found at {service_template}")
+        return
+
+    service_dir = Path.home() / ".config" / "systemd" / "user"
+    service_dest = service_dir / "stopkran.service"
+    service_dir.mkdir(parents=True, exist_ok=True)
+
+    content = _render_template(service_template, _resolve_template_vars())
+
+    # Inject proxy environment variables into the [Service] section
+    env_lines = []
+    for var in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                "http_proxy", "https_proxy", "no_proxy"):
+        val = os.environ.get(var)
+        if val:
+            env_lines.append(f"Environment={var}={val}")
+    if env_lines:
+        content = content.replace(
+            "[Install]",
+            "\n".join(env_lines) + "\n\n[Install]",
+        )
+
+    with open(service_dest, "w") as f:
+        f.write(content)
+
+    subprocess.run(["systemctl", "--user", "daemon-reload"], capture_output=True)
+    subprocess.run(
+        ["systemctl", "--user", "enable", "stopkran"],
+        capture_output=True,
+    )
+    result = subprocess.run(
+        ["systemctl", "--user", "restart", "stopkran"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        print(f"✅ systemd service installed and started: {service_dest}")
+    else:
+        print(f"⚠️  systemctl restart failed: {result.stderr}")
+        print(f"Service saved to {service_dest} — start it manually:")
+        print(f"  systemctl --user start stopkran")
+
+
+def step_autostart():
+    """Install autostart service (OS-dependent)."""
+    print("\n── Step 4: Autostart ──")
+    if sys.platform == "darwin":
+        step_launchd()
+    elif sys.platform == "linux":
+        step_systemd()
+    else:
+        print(f"Unsupported platform ({sys.platform}) — skipping autostart setup.")
+        print("Start the daemon manually: uv run python stopkran_daemon.py")
+
+
 def main():
     print("🔐 Stopkran Setup Wizard")
     print("=" * 40)
@@ -179,13 +248,13 @@ def main():
     token = step_token()
     step_config(token)
     step_hook()
-    step_launchd()
+    step_autostart()
 
     print("\n" + "=" * 40)
     print("🎉 Setup complete!")
     print()
     print("Next steps:")
-    print("  1. Start the daemon:  uv run python stopkran_daemon.py")
+    print("  1. Start the daemon:  make start-bg  (or: uv run python stopkran_daemon.py)")
     print("  2. Send /start to your bot in Telegram")
     print("  3. Claude Code will now forward permission requests to Telegram")
 

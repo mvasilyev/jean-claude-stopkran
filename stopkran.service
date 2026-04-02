@@ -1,0 +1,16 @@
+[Unit]
+Description=Stopkran — Telegram approval daemon for Claude Code
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{UV}} run --project {{PROJECT}} python {{DAEMON}}
+WorkingDirectory={{PROJECT}}
+Restart=always
+RestartSec=5
+StandardOutput=append:{{LOG}}
+StandardError=append:{{LOG}}
+
+[Install]
+WantedBy=default.target
